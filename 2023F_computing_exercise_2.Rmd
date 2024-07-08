@@ -1,0 +1,199 @@
+---
+title: "Computing Homework 2"
+date: "Due: Wednesday 12/6 at 11:59pm, Canvas submission"
+output: html_notebook
+---
+
+
+### Honor Pledge
+
+
+**On my honor, I have neither received nor given any unauthorized assistance on this Homework.**
+
+* SIGNED: 209008173
+
+```{r setup, results=F, message=FALSE, error=FALSE, warning=FALSE}
+# Load packages
+library(ggplot2)
+library(rstanarm)
+library(bayesplot)
+library(bayesrules)
+library(tidyverse)
+library(tidybayes)
+library(broom.mixed)
+```
+
+
+<br>
+<br>
+
+
+We will use `penguins_data` (generated for you below) to build various models of penguin `body_mass_g`. Throughout, we'll utilize weakly informative priors and a basic understanding that the average penguin weighs somewhere between 3,500 and 4,500 grams. One predictor of interest is penguin species: `Adelie` or `Gentoo`. 
+
+```{r}
+penguin_data <- penguins_bayes %>% 
+  filter(species %in% c("Adelie", "Gentoo")) %>%
+  select(flipper_length_mm, body_mass_g, species) %>% 
+  na.omit() 
+```
+
+## 1. Modeling Main Effects (3pt)
+
+Let’s begin our analysis of penguin `body_mass_g` by exploring its relationship with `flipper_length_mm` and `species`.
+
+#### Q: Plot and summarize the observed relationships among these three variables. (0.5pt)
+
+Hint: use `ggplot()` and set `color = species` to color the two types of penguins differently.
+
+```{r}
+ggplot(penguin_data, aes(y = body_mass_g, x = flipper_length_mm, color = species)) +
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE)
+```
+SUMMARY: 
+Body mass increases as flipper length increases (no matter the species); body mass tends to be higher among Gentoo penguins compared to Adelie penguins (lower mean, minimum, and maximum mass among Adelie penguins)
+
+
+#### Q: Use `stan_glm()` to simulate a posterior Normal regression model of `body_mass_g` by `flipper_length_mm` and `species`, without an interaction term. (0.5pt)
+
+```{r}
+penguin_main <- stan_glm(
+  body_mass_g ~ flipper_length_mm + species, 
+  data = penguin_data, family = gaussian, 
+  prior_intercept = normal(4000, 250), 
+  prior = normal(0, 2.5, autoscale = TRUE), 
+  prior_aux = exponential(1, autoscale = TRUE),
+  chains = 4, iter = 5000*2, seed = 84735)
+```
+
+#### Q: Create and interpret both visual and numerical diagnostics of your MCMC simulation. (0.5pt)
+
+
+```{r}
+mcmc_dens_overlay(penguin_main) + 
+  ylab("density")
+mcmc_trace(penguin_main)
+mcmc_acf(penguin_main)
+neff_ratio(penguin_main)
+rhat(penguin_main)
+```
+INTERPRETATION:
+Density plots of individual chains produce almost identical posterior approximations, indicating the MCMC simulation is stable and runs long enough
+Trace plots overlap well and do not go up or down over time, and autocorrelation drops quickly for all parameters; this indicates that the MCMC simulation is fast-mixing/works well
+Effective sample size ratios are greater than 0.1 and R-hat is close to 1 (less than 1.05) for all parameters, also indicating that the MCMC simulation is working well
+
+#### Q: Produce a `tidy()` summary of this model. Interpret the non-intercept coefficients’ posterior median values in context. (0.5pt)
+
+
+```{r}
+tidy(penguin_main, effects = c("fixed", "aux"),
+     conf.int = TRUE, conf.level = 0.80) %>% 
+  select(-std.error)
+```
+INTERPRETATION:
+The penguins body masses increase by about 42.58779 for every millimeter increase in flipper length.
+The typical Gentoo penguin's body mass is about 216.13722 grams higher than the typical Adelie penguin's body mass.
+
+#### Q: Simulate, plot, and describe the posterior predictive model for the body mass of an `Adelie` penguin that has a flipper length of 197. (1pt)
+
+
+```{r}
+set.seed(84735)
+bm_prediction <- posterior_predict(
+  penguin_main,
+  newdata = data.frame(flipper_length_mm = c(197), 
+                       species = c("Adelie")))
+mcmc_areas(bm_prediction) +
+  ggplot2::scale_y_discrete(labels = c("Adelie")) + 
+  xlab("body_mass_g")
+```
+DESCRIPTION:
+The posterior predictive model indicates that for an Adelie penguin with of flipper length of 197, we can expect a body mass roughly between 3750 and 4250.
+
+
+## 2. Modeling Interaction (3pt)
+
+Building from the previous exercise, our next goal is to model `body_mass_g` by `flipper_length_mm` and `species` with an **interaction** term between these two predictors.
+
+#### Q: Use `stan_glm()` to simulate the posterior for this model, with four chains at 10,000 iterations each. (1pt)
+
+```{r}
+penguin_interact <- stan_glm(
+  body_mass_g ~ flipper_length_mm + species + flipper_length_mm:species, 
+  data = penguin_data, family = gaussian, 
+  prior_intercept = normal(4000, 250), 
+  prior = normal(0, 2.5, autoscale = TRUE), 
+  prior_aux = exponential(1, autoscale = TRUE),
+  chains = 4, iter = 5000*2, seed = 84735)
+```
+
+
+#### Q: Simulate and plot 50 posterior model lines. Briefly describe what you learn from this plot. (1pt)
+
+```{r}
+penguin_data %>%
+  add_fitted_draws(penguin_interact, n = 50) %>%
+  ggplot(aes(x = flipper_length_mm, y = body_mass_g, color = species)) +
+    geom_line(aes(y = .value, group = paste(species, .draw)), alpha = 0.1)
+```
+DESCRIPTION:
+Generally, the Gentoo posterior models are slightly more positive (in slope) than the Adelie posterior models. This implies that the association between flipper length and species is slightly more positive for Gentoo penguins than for Adelie ones.
+
+
+#### Q: Produce a `tidy()` summary for this model. Based on the summary, do you have evidence that the interaction terms are necessary for this model? Explain your reasoning. (1pt)
+
+
+```{r}
+tidy(penguin_interact, effects = c("fixed", "aux"))
+```
+INTERPRETATION:
+According to the summary, the association between body mass and flipper length is different between species. 
+Gentoo penguins generally gain about 1.5 times more body mass per mm in flipper length compared to Adelaide penguins: 34.61639 + 17.35665 (or 51.97304) grams per millimeter compared to 34.61630 grams per millimeter.
+Since the association is different between species, interaction terms are necessary for this model.
+
+
+## 3. Model Comparison (4pt)
+
+#### Q: Produce and compare the `pp_check()` plots for both models above (`penguin_main` and `penguin_interact`). (1pt)
+
+```{r}
+pp_check(penguin_main)
+pp_check(penguin_interact)
+```
+COMPARISON:
+Both models seem to have trouble with the second/right-hand mode; they place it around 5000, when it should be less (around 4750) according to the plot. The penguin_interact model places more mass at the first/left mode and less mass at the second mode compared to the penguin-main model, but they both place more mass at the first mode than the second.
+
+#### Q: Use 10-fold cross-validation to assess and compare the posterior predictive quality of the two models using `prediction_summary_cv()`. (1pt)
+
+
+**Note**: this step might take some time! In addition, you will want to `set.seed()` at some seed value before running `prediction_summary_cv()` in order to reproduce your results.
+
+```{r}
+set.seed(84735)
+prediction_summary_cv(model = penguin_main, data = penguin_data, k = 10)
+prediction_summary_cv(model = penguin_interact, data = penguin_data, k = 10)
+```
+COMPARISON: 
+penguin_main has a smaller mae and mae_scaled than penguin_interact, and it has a greater within_95 coverage statistic. While penguin_interact has a greater within_50 statistic, penguin_main slightly outperforms it by any other measure that prediction_summary_cv() provides.
+
+#### Q: Evaluate and compare the ELPD posterior predictive accuracy of the two models. (1pt)
+
+```{r}
+set.seed(84735)
+loo_1 <- loo(penguin_main)
+loo_2 <- loo(penguin_interact)
+loo_1
+loo_2
+loo_compare(loo_1, loo_2)
+```
+
+COMPARISON:
+According to loo_compare, penguin_interact is the more accurate model. Compared to penguin_interact, penguin_main has an ELPD that is estimated to be lower by 3.7 (with the true difference being within 4.2 units of -3.7).
+
+#### Q: In summary, which one of the two models is ``better?'' Explain. (1pt)
+The penguin_interact (the model with the interaction term) is the better model. While the posterior predictive check and 10-fold cross-validation suggest there is only a slight difference in accuracy, the fact that penguin_interact has a greater ELPD indicates that it is the more accurate model. 
+Furthermore, since there is a difference in association between body mass and flipper length across species according to the posterior model lines and tidy() summary (although this difference is not extreme), it should be helpful to use the model with interaction terms.
+
+
+
+

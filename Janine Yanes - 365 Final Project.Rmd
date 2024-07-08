@@ -1,0 +1,194 @@
+---
+title: "Bayesian (365) Final Project"
+author: "Janine Yanes"
+output: html_notebook
+---
+
+This project utilizes 2 datasets. 
+
+One (`covid_dataset`) was found on DataHub, but was collected from a variety of sources by the Johns Hopkins University Center for Systems Science and Engineering (CSSE). A complete list of these sources can be found in the CSSE's data repository (https://github.com/CSSEGISandData/COVID-19) as well as on the DataHub webpage where it was found (https://datahub.io/core/covid-19#resource-covid-19_zip). The data lists cumulative COVID-19 cases, recoveries, and deaths over time, from 1/22/2020 to 1/23/2022, for various countries. However, for this analysis, we will only be using the data for the New Jersey counties, `NJ_data`.
+
+The other dataset (`county_population`) was collected by the US Census Bureau, through the American Community Survey. It contains the 2015-2019 estimates for the population size and density of each county in the United States. Once again, we will only be using the data for New Jersey, `county_population_NJ`.
+
+The goal of this analysis is to see how time and population density affected the amount of COVID cases for each county in New Jersey, particularly after COVID vaccines became widely available after December 2020.
+```{r}
+#Load packages
+library(ggplot2)
+library(rstanarm)
+library(bayesplot)
+library(bayesrules)
+library(tidyverse)
+library(tidybayes)
+library(broom.mixed)
+library(jsonlite)
+library(BTYD)
+library(lubridate)
+library(bayesmix)
+
+#getting data
+covid_file = 'https://datahub.io/core/covid-19/datapackage.json'
+covid_dataset = fromJSON(paste(readLines(covid_file), collapse=""))
+US_data = read.csv(url(covid_dataset$resources$path[9]))
+NJ_data = subset(US_data, Province.State == "New Jersey")
+head(NJ_data)
+
+setwd("/Users/yanes/Downloads") #setting directory: WILL HAVE TO BE CHANGED FOR OTHER NJERS
+county_population = read.csv("Population_-_Counties_2015-2019.csv")
+county_population_NJ = subset(county_population, GEO_PARENT_NAME == "New Jersey")
+head(county_population_NJ)
+```
+
+Here we will update `NJ_data` to make it easier to analyze and then plot the data. 
+First, instead of having the data list cumulative COVID cases in each county for each day , we will make it so that it lists the incremental amount of COVID cases for each month, from 12/1/2020 to 12/1/2021. We will also make a column for months since 12/1/2020, so that the time passed can be measured in integers instead of dates. 
+
+Next, we will combine `NJ_data` and `county_population_NJ` so that `NJ_data` contains the population and population density for each county. After this, we will no longer need `county_population_NJ` since `NJ_data` will have all the relevant information.
+
+Furthermore, we will have a column listing the amount of COVID cases for each month as a percentage of the county's population. This is what will be using for analysis, rather than the number of cases, in order to reduce the effect of population size on the data. 
+
+After all that, we will be able to plot the data in order to see the relationship between months since 12/1/2020, percentage of the population infected, and county.
+```{r}
+#subsetting data so that it is monthly instead of daily
+NJ_data$Dates_converted = as.Date(NJ_data$Date)
+NJ_data = subset(NJ_data, as.numeric(format(NJ_data$Dates_converted, '%d')) == 1)
+#converting dates to months since 12/1/2020
+NJ_data$Months_since_12_1_20 = NA
+NJ_data$Months_since_12_1_20 = interval(as.Date("2020-12-1"), NJ_data$Dates_converted) %/% months(1)
+#converting cumulative COVID cases to monthly cases
+NJ_data$Confirmed_monthly = NA
+NJ_data$Confirmed_monthly[1] = NJ_data$Confirmed[1]
+for (NJ_index in 2:nrow(NJ_data)) {
+  NJ_data$Confirmed_monthly[NJ_index] = NJ_data$Confirmed[NJ_index] - NJ_data$Confirmed[NJ_index - 1]
+  if (NJ_data$Admin2[NJ_index] != NJ_data$Admin2[NJ_index - 1]) {
+    NJ_data$Confirmed_monthly[NJ_index] = NJ_data$Confirmed[NJ_index]
+  }
+  if(NJ_data$Confirmed_monthly[NJ_index] < 0) {
+    NJ_data$Confirmed_monthly[NJ_index] = 0
+  }
+}
+#subsetting data so that  it doesn't go past 1/22/21
+NJ_data = subset(NJ_data, Months_since_12_1_20 >= 0 & Months_since_12_1_20 <= 12)
+#renaming county name column to County in both datasets
+NJ_data$County = NA
+NJ_data$County = NJ_data$Admin2
+county_population_NJ$County = NA
+county_population_NJ$County = county_population_NJ$NAME
+#adding population and population density from county_population_NJ to NJ_data
+NJ_data$Population_density = NA
+NJ_data$Population = NA
+NJ_index = 1
+while (NJ_index <= nrow(NJ_data)) {
+  county = 1
+  #if NJ_data has a county that is not in county_population, the data for that county is removed from NJ_data
+  while (county_population_NJ$County[county] != NJ_data$County[NJ_index]) {
+    county = county + 1
+    if (county == (nrow(county_population_NJ) + 1)) {
+      NJ_data = subset(NJ_data, County != NJ_data$County[NJ_index])
+      break
+    }
+  }
+  if (county == (nrow(county_population_NJ) + 1)) {
+    next
+  }
+  #if the county is in both datasets, update the population and population density for all data values for that county
+  for (county_update in 0:12) {
+    NJ_data$Population_density[NJ_index + county_update] = county_population_NJ$POP_DENSITY[county]
+    NJ_data$Population[NJ_index + county_update] = county_population_NJ$B01001_001E[county]
+  }
+  #move on to next county in NJ_data (each county has 13 data entries)
+  NJ_index = NJ_index + 13
+}
+#converting County_Province_State to integers (each county has a different number)
+NJ_data$County_ID = NA
+county_ID = 1
+NJ_index = 1
+while (NJ_index <= length(NJ_data$County)) {
+  for (count in 1:13) {
+    NJ_data$County_ID[NJ_index] = county_ID
+    NJ_index = NJ_index + 1
+  }
+  county_ID = county_ID + 1
+}
+#converting monthly cases into percentage of population infected that month (1% of population means Confirmed_monthly_percentage = 1)
+NJ_data$Confirmed_monthly_percentage = NA
+NJ_data$Confirmed_monthly_percentage = (NJ_data$Confirmed_monthly / NJ_data$Population) * 100
+#create a subset of NJ_data with relevant variables only
+NJ_data = NJ_data %>%
+  dplyr::select(Months_since_12_1_20, County, County_ID, Confirmed_monthly, Confirmed_monthly_percentage, Population, Population_density)
+head(NJ_data)
+write.csv(NJ_data, "C:\\Users\\yanes\\Downloads\\test.csv")
+#plotting NJ_data
+ggplot(NJ_data, aes(y = Confirmed_monthly_percentage, x = Months_since_12_1_20, color = County)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE)
+ggplot(NJ_data, aes(x = Confirmed_monthly_percentage)) + 
+  geom_histogram(color = "white", binwidth = 0.5)
+ggplot(NJ_data, aes(x = log(Confirmed_monthly_percentage))) + 
+  geom_histogram(color = "white", binwidth = 0.5)
+```
+
+As you can see in the plot above, all of the counties seem to have a negative relationship between months since 12/1/2020 and confirmed COVID cases, although some relationships are more negative than others. Furthermore, no county has a particularly higher or lower amount of COVID cases than the other; they all overlap.
+
+As for the distribution of `Confirmed_monthly_percentage`, it is positively skewed, rather than normal. Trying to use log(Confirmed_monthly_percentage) simply leads to it being skewed the other direction. This implies that we shouldn't a normal regression model. Since the data is positively skewed and doesn't use integers (i.e. a count), a Gamma model seems the most appropriate to use in `stan_glmer()`. 
+
+Just in case, we will simulate both a Gamma posterior model and a normal posterior model for NJ_data for comparison, using default priors. 
+Both will be hierarchical models for `Confirmed_monthly_percentage`, with `Months_since_12_1_20` as an individual-level predictor and `Population_density` as a group-level predictor. 
+```{r}
+#changing data points where Confirmed_monthly_percentage equals 0 to a minuscule amount
+NJ_data["Confirmed_monthly_percentage"][NJ_data["Confirmed_monthly_percentage"] == 0] = 0.000000000000000001
+NJ_model_gamma = stan_glmer(
+  Confirmed_monthly_percentage ~ Population_density + Months_since_12_1_20 + (1 | County_ID), 
+  data = NJ_data, family = Gamma,
+  chains = 5, iter = 10000*2, seed = 84735
+)
+NJ_model_normal = stan_glmer(
+  Confirmed_monthly_percentage ~ Population_density + Months_since_12_1_20 + (1 | County_ID), 
+  data = NJ_data, family = gaussian,
+  chains = 5, iter = 10000*2, seed = 84735
+)
+prior_summary(NJ_model_gamma)
+prior_summary(NJ_model_normal)
+```
+
+Here we will run diagnostics for both models and compare the two.
+```{r}
+mcmc_trace(NJ_model_gamma)
+neff_ratio(NJ_model_gamma)
+rhat(NJ_model_gamma)
+pp_check(NJ_model_gamma) 
+mcmc_trace(NJ_model_normal)
+neff_ratio(NJ_model_normal)
+rhat(NJ_model_normal)
+pp_check(NJ_model_normal)
+loo_gamma <- loo(NJ_model_gamma)
+loo_normal <- loo(NJ_model_normal)
+loo_gamma$estimates
+loo_normal$estimates
+loo_compare(loo_gamma, loo_normal)
+```
+In terms of trace plots, effective sample size, and R-hat, everything looks good for both models (trace plots overlap well and do not go up or down over time, effective sample size ratios are greater than 0.1 and R-hat is close to 1 for all parameters). As for the posterior predictive checks, they both seem to be struggling, but the normal model is visibly less accurate, as it places most of the mass around 0.03 rather than 0.01. The gamma model also has a higher ELPD estimate, although the difference is not statistically significant.
+
+As a result, we will be definitively using the gamma model as our model from now on.
+```{r}
+NJ_model = NJ_model_gamma
+tidy(NJ_model, effects = c("fixed", "aux"),
+     conf.int = TRUE, conf.level = 0.90)
+```
+The summary shows that an increase in population density has an ambiguous effect on COVID-case percentage; while the estimate is slightly positive (0.000014% per person/square km), it is almost 0 in this context. Also, the confidence interval includes 0, suggesting that population density's actual relation to COVID-case percentage could be positive or negative. 
+As for `Months_since_12_1_20`, it is also associated with a slight increase in COVID cases, but with a greater effect  (0.14% per month according to the estimate). Furthermore, its confidence interval does not include 0 (making it more believable that `Months_since_12_1_20` has a positive relation to `Confirmed_monthly_percentage`).
+
+Lastly, let's use the model to make predictions for Somerset County, which should have a County_ID of 18. 
+```{r}
+Somerset_pop_density = subset(NJ_data, County == "Somerset")[1,3] 
+NJ_predict <- posterior_predict(
+  NJ_model, 
+  newdata = data.frame(Months_since_12_1_20 = c(6), Population_density = c(Somerset_pop_density), County_ID = c(18),
+            County = "Somerset"))
+mcmc_areas(NJ_predict) +
+  ggtitle("Predictive distribution for Somerset's COVID cases from 5/2/21 to 6/1/21") + 
+  xlab("Confirmed_monthly_percentage")
+```
+The posterior predictive model indicates that for Somerset County, with its own population density, 6 months after 12/1/2020, we can expect an COVID-infected population percentage that's roughly between 0.4% and 1%, with 0.7% being the most likely.
+
+
+HONOR PLEDGE: On my honor, I have neither received nor given any unauthorized assistance on this project
+Janine Yanes
