@@ -32,7 +32,7 @@ US_data = read.csv(url(covid_dataset$resources$path[9]))
 NJ_data = subset(US_data, Province.State == "New Jersey")
 head(NJ_data)
 
-setwd("/Users/yanes/Downloads") #setting directory: WILL HAVE TO BE CHANGED FOR OTHER NJERS
+setwd("/Users/yanes/Downloads") #setting directory: WILL HAVE TO BE CHANGED FOR OTHER USERS
 county_population = read.csv("Population_-_Counties_2015-2019.csv")
 county_population_NJ = subset(county_population, GEO_PARENT_NAME == "New Jersey")
 head(county_population_NJ)
@@ -192,3 +192,4 @@ The posterior predictive model indicates that for Somerset County, with its own 
 
 HONOR PLEDGE: On my honor, I have neither received nor given any unauthorized assistance on this project
 Janine Yanes
+
